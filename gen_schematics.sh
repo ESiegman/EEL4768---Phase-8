@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUT_DIR="${SCRIPT_DIR}/build/schematics"
+rm -rf "${OUT_DIR}"
+mkdir -p "${OUT_DIR}"
+
+if ! command -v yosys >/dev/null 2>&1; then
+    echo "ERROR: yosys not found on PATH." >&2
+    exit 1
+fi
+if ! command -v netlistsvg >/dev/null 2>&1; then
+    echo "ERROR: netlistsvg not found on PATH (npm i -g netlistsvg)." >&2
+    exit 1
+fi
+# Optional: also rasterize each SVG to PNG with rsvg-convert. GitHub's job
+# summary sanitizer strips <img src="data:image/svg+xml..."> (SVG data URIs
+# can carry a <script>/foreignObject payload) but allows data:image/png, so
+# the CI workflow inlines the PNG into the summary and keeps the SVG as the
+# full-quality artifact. Skipped silently if rsvg-convert isn't installed
+# (brew install librsvg / apt install librsvg2-bin).
+HAVE_RSVG=0
+if command -v rsvg-convert >/dev/null 2>&1; then
+    HAVE_RSVG=1
+fi
+
+# Each module's own file plus any modules it instantiates. decoder embeds
+# imm (see decoder.v), cache embeds plru, and hart embeds alu/rf/decoder
+# (which embeds imm), fpu, rat, cdb_arb and the data cache, so their
+# schematics need those files in the same yosys read. Add any other backend
+# files hart needs (ROB, RS, LSU, ...) to the hart line.
+# No associative arrays here on purpose -- macOS ships bash 3.2, which
+# doesn't have them, and this script also runs via `make test` locally.
+module_sources() {
+    case "$1" in
+        decoder) echo "decoder.v imm.v" ;;
+        cache)   echo "cache/cache.v cache/plru.v" ;;
+        fpu)     echo "fpu.v fpu_fma.v fpu_cvt.v fpu_round.v fpu_divsqrt.v" ;;
+        rs)      echo "rs.v reservation_station.v alu.v decoder.v imm.v" ;;
+        fp_rs)   echo "fp_rs.v fp_exec.v reservation_station.v fpu.v fpu_fma.v fpu_cvt.v fpu_round.v fpu_divsqrt.v" ;;
+        hart)    echo "hart.v alu.v rf.v decoder.v imm.v rat.v cdb_arb.v lsu.v rs.v reservation_station.v fp_rs.v fp_exec.v fcsr.v cache/cache.v cache/plru.v fpu.v fpu_fma.v fpu_cvt.v fpu_round.v fpu_divsqrt.v" ;;
+        *)       echo "$1.v" ;;
+    esac
+}
+
+overall_status=0
+
+for name in alu imm rf decoder cache fpu rs fp_rs fcsr rat cdb_arb hart; do
+    sources=""
+    missing=0
+    for f in $(module_sources "${name}"); do
+        if [[ ! -f "${SCRIPT_DIR}/${f}" ]]; then
+            missing=1
+            break
+        fi
+        sources="${sources} ${SCRIPT_DIR}/${f}"
+    done
+
+    if [[ "${missing}" -eq 1 ]]; then
+        echo "SKIP Schematic: ${name}  --  a dependency has not been written yet"
+        continue
+    fi
+
+    json="${OUT_DIR}/${name}.json"
+    svg="${OUT_DIR}/${name}.svg"
+    log="${OUT_DIR}/${name}.yosys.log"
+
+    # Match the graded hart harness for the standalone cache diagram.
+    # Its 16-byte lines also keep recursive bus splitting tractable in
+    # netlistsvg; cache_tb still tests the wider hardware configurations.
+    parameters=""
+    if [[ "${name}" == "cache" ]]; then
+        parameters="chparam -set EVICT_POLICY 1 -set NUM_WAYS 4 -set CACHE_SIZE 2 -set BLOCK_SIZE 16 -set PREFETCH_EN 1 cache;"
+    fi
+    yosys_script="read_verilog -sv ${sources}; ${parameters} hierarchy -top ${name}; proc; opt; pmuxtree; opt_clean; write_json ${json}"
+
+    if ! yosys -p "${yosys_script}" > "${log}" 2>&1; then
+        echo "FAIL Schematic: ${name}  --  yosys synthesis error, see build/schematics/${name}.yosys.log"
+        overall_status=1
+        continue
+    fi
+
+    if ! node "${SCRIPT_DIR}/tools/render_schematic.cjs" "$(command -v netlistsvg)" "${json}" -o "${svg}" >> "${log}" 2>&1; then
+        echo "FAIL Schematic: ${name}  --  netlistsvg render error, see build/schematics/${name}.yosys.log"
+        overall_status=1
+        continue
+    fi
+
+    if [[ "${HAVE_RSVG}" -eq 1 ]]; then
+        png="${OUT_DIR}/${name}.png"
+        rsvg-convert -b white -o "${png}" "${svg}" >> "${log}" 2>&1 || true
+    fi
+
+    echo "OK   Schematic: ${name}  --  build/schematics/${name}.svg"
+done
+
+exit "${overall_status}"
