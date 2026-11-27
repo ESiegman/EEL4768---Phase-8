@@ -186,17 +186,8 @@ module alu (
         endcase
     end
 
-    // ------------------------------------------------------------------
-    // RV32M: iterative shift-and-add multiplier and restoring divider
-    // (phase_6.pdf 4.3, 5.1). Both work on unsigned magnitudes, one bit per
-    // cycle, and fix the sign at the end (Figure 5).
-    //
-    //  * cycle 1: i_mext rises, o_busy goes high, operands are latched
-    //  * cycles 2-33: 32 steps
-    //  * then o_busy drops and the result is held until i_advance
-    // A finished result is never restarted, so a cache freeze that keeps
-    // the instruction in EX after it finishes cannot rerun it.
-    // ------------------------------------------------------------------
+    // RV32M uses unsigned magnitudes internally. Only the high half of a
+    // product depends on operand signedness. INT_MIN is a valid magnitude.
     wire m_is_div = i_opsel[2];
     // Which operands are signed: mulh, mulhsu, div, rem read rs1 as signed;
     // mulh, div, rem read rs2 as signed. mul's low half is sign-agnostic.
@@ -211,65 +202,92 @@ module alu (
     wire [31:0] m_mag2 = m_neg2 ? (~i_op2 + 32'd1) : i_op2;
     wire        m_div_zero = (i_op2 == 32'd0);
 
-    reg         m_running;
-    reg         m_done;
-    reg  [ 4:0] m_count;      // steps taken, 0..31
-    reg         m_div;        // latched: divide (1) or multiply (0)
-    reg  [ 1:0] m_sel;        // latched funct3[1:0]
-    reg         m_neg_main;   // negate the product / quotient
-    reg         m_neg_rem;    // negate the remainder
-    // Multiply: the multiplicand shifts left, the multiplier shifts right.
-    reg  [63:0] m_mcand;
-    reg  [31:0] m_mplier;
-    reg  [63:0] m_prod;
-    // Divide: {remainder, quotient} shift left together; the dividend
-    // starts in the quotient register and is shifted out as quotient bits
-    // are shifted in.
-    reg  [31:0] m_rem;
-    reg  [31:0] m_quo;
-    reg  [31:0] m_dvsr;
-
-    // One multiply step: add the multiplicand if the low multiplier bit is 1.
-    wire [63:0] m_prod_next = m_mplier[0] ? (m_prod + m_mcand) : m_prod;
-
-    // One restoring-division step: bring down the next dividend bit, and
-    // subtract the divisor if the partial remainder is at least the divisor.
-    wire [32:0] m_rem_shift = {m_rem, m_quo[31]};
-    wire        m_rem_ge    = (m_rem_shift >= {1'b0, m_dvsr});
-    wire [32:0] m_rem_sub   = m_rem_shift - {1'b0, m_dvsr};
-    wire [31:0] m_rem_next  = m_rem_ge ? m_rem_sub[31:0] : m_rem_shift[31:0];
-
+    reg         m_running, m_done, m_div;
+    reg  [1:0]  m_sel;
+    reg         m_neg_main, m_neg_rem;
     wire        m_start = i_mext & ~m_running & ~m_done;
+
+    // 32 partial products, five levels of pairwise adders. Latch each sum
+    // of eight rows on launch. The second edge captures the whole product.
+    wire [63:0] product_tree [1:63];
+    reg  [63:0] m_prod;
+    genvar row, node;
+    generate
+        for (row = 0; row < 32; row = row + 1) begin : partial_product
+            assign product_tree[32 + row] =
+                m_mag2[row] ? {{(32-row){1'b0}}, m_mag1, {row{1'b0}}} : 64'd0;
+        end
+        for (node = 1; node < 32; node = node + 1) begin : sum_pair
+            wire [63:0] sum = product_tree[node + node] + product_tree[node + node + 1];
+            if (node >= 4 && node < 8) begin : stage_boundary
+                reg [63:0] subtotal;
+                always @(posedge i_clk) begin
+                    if (m_start && !m_is_div)
+                        subtotal <= sum;
+                end
+                assign product_tree[node] = subtotal;
+            end else begin : combinational
+                assign product_tree[node] = sum;
+            end
+        end
+    endgenerate
+
+    // Radix-4 restoring division. If r < d, bringing down two dividend
+    // bits gives a trial below 4d. The largest multiple it can subtract
+    // gives the next base-four digit and restores the invariant r < d.
+    reg [31:0] m_rem, m_quo, m_dvsr;
+    reg [33:0] divisor3;
+    reg [3:0]  last_digit;
+    wire [33:0] trial = {m_rem, m_quo[31:30]};
+    wire [33:0] divisor1 = {2'b0, m_dvsr};
+    wire [33:0] divisor2 = {1'b0, m_dvsr, 1'b0};
+    wire [34:0] diff1 = {1'b0, trial} - {1'b0, divisor1};
+    wire [34:0] diff2 = {1'b0, trial} - {1'b0, divisor2};
+    wire [34:0] diff3 = {1'b0, trial} - {1'b0, divisor3};
+    wire [1:0] digit = !diff3[34] ? 2'd3 : !diff2[34] ? 2'd2 :
+                       !diff1[34] ? 2'd1 : 2'd0;
+    wire [31:0] next_rem = !diff3[34] ? diff3[31:0] : !diff2[34] ? diff2[31:0] :
+                           !diff1[34] ? diff1[31:0] : trial[31:0];
+
+    // A dividend prefix smaller than the divisor produces only leading
+    // zero quotient digits. Install that prefix as the initial remainder.
+    wire skip24 = {8'd0, m_mag1[31:8]} < m_mag2;
+    wire skip16 = {16'd0, m_mag1[31:16]} < m_mag2;
+    wire unit_divisor = (m_mag2 == 32'd1);
+    wire small_dividend = (m_mag1 < m_mag2);
+    wire div_shortcut = m_div_zero | unit_divisor | small_dividend;
 
     always @(posedge i_clk) begin
         if (i_rst | i_advance | ~i_mext) begin
             m_running <= 1'b0;
             m_done    <= 1'b0;
-            m_count   <= 5'd0;
         end else if (m_start) begin
-            m_running  <= 1'b1;
-            m_count    <= 5'd0;
+            m_running  <= ~(m_is_div & div_shortcut);
+            m_done     <= m_is_div & div_shortcut;
             m_div      <= m_is_div;
             m_sel      <= i_opsel[1:0];
-            // Divide by zero: the unsigned divider already gives an all-ones
-            // quotient, so the quotient is never negated (x/0 = -1 for any
-            // sign of x). The remainder takes the dividend's sign.
-            m_neg_main <= m_is_div ? ((m_neg1 ^ m_neg2) & ~m_div_zero) : (m_neg1 ^ m_neg2);
+            m_neg_main <= (m_neg1 ^ m_neg2) & ~m_div_zero;
             m_neg_rem  <= m_neg1;
-            m_mcand    <= {32'd0, m_mag1};
-            m_mplier   <= m_mag2;
-            m_prod     <= 64'd0;
-            m_rem      <= 32'd0;
-            m_quo      <= m_mag1;
-            m_dvsr     <= m_mag2;
+            if (m_is_div) begin
+                m_dvsr     <= m_mag2;
+                divisor3   <= {2'b0, m_mag2} + {1'b0, m_mag2, 1'b0};
+                last_digit <= skip24 ? 4'd3 : skip16 ? 4'd7 : 4'd15;
+                m_rem <= div_shortcut ? (unit_divisor ? 32'd0 : m_mag1) :
+                         skip24 ? {8'd0, m_mag1[31:8]} :
+                         skip16 ? {16'd0, m_mag1[31:16]} : 32'd0;
+                m_quo <= m_div_zero ? 32'hffff_ffff : unit_divisor ? m_mag1 :
+                         small_dividend ? 32'd0 : skip24 ? {m_mag1[7:0], 24'd0} :
+                         skip16 ? {m_mag1[15:0], 16'd0} : m_mag1;
+            end
         end else if (m_running) begin
-            m_count  <= m_count + 5'd1;
-            m_prod   <= m_prod_next;
-            m_mcand  <= {m_mcand[62:0], 1'b0};
-            m_mplier <= {1'b0, m_mplier[31:1]};
-            m_rem    <= m_rem_next;
-            m_quo    <= {m_quo[30:0], m_rem_ge};
-            if (m_count == 5'd31) begin
+            if (m_div) begin
+                m_rem      <= next_rem;
+                m_quo      <= {m_quo[29:0], digit};
+                last_digit <= last_digit - 4'd1;
+            end else begin
+                m_prod <= product_tree[1];
+            end
+            if (!m_div || last_digit == 4'd0) begin
                 m_running <= 1'b0;
                 m_done    <= 1'b1;
             end
