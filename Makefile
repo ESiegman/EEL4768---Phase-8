@@ -1,4 +1,4 @@
-.PHONY: help test ci schematics fv speedup clean
+.PHONY: help test ci schematics fv speedup bench bench-full submission clean
 
 help:
 	@echo "make test        run your testbenches (writes results/local.txt)"
@@ -8,6 +8,9 @@ help:
 	@echo "make fv          formal check: fv/riscv/run.sh on riscv_fv.v, cdb_arb.v, rat.v"
 	@echo "                 (needs the OSS CAD Suite on PATH, phase_7.pdf 6.3)"
 	@echo "make speedup     IPC vs the frozen phase 7 design (baseline/phase7/)"
+	@echo "make bench       compare retire traces and IPC on 12 workloads"
+	@echo "make bench-full  run every workload at four cache settings and three latencies"
+	@echo "make submission  package the submission RTL in build/phase8_submission.zip"
 	@echo "make clean       remove results/ and build/"
 	@echo
 	@echo "Details:      ./run_test.sh <name> [submission_dir]"
@@ -31,6 +34,17 @@ schematics:
 
 speedup:
 	@./tools/speedup/compare.sh
+
+bench:
+	@python3 tools/bench/compare.py
+
+bench-full:
+	@python3 tools/bench/compare.py --full
+
+# Keep the archive layout identical to Phase 7.
+submission:
+	@mkdir -p build
+	@git ls-files -- '*.v' | awk '($$0 !~ /\// || $$0 ~ /^cache\/[^/]+$$/) && $$0 !~ /_tb\.v$$/' | zip -q -FS build/phase8_submission.zip -@
 
 fv:
 	@./fv/riscv/run.sh .
