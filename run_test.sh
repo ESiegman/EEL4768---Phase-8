@@ -47,7 +47,7 @@ fi
 # The two .trace files are the phase 4 course traces: cycle by cycle for an
 # in-order pipeline, so only their retire lines (not BUBBLE lines or cycle
 # numbers) apply to an out-of-order hart. traces/random_*.hex are phase 6's.
-MODULES=(alu imm rf_bypass rf_no_bypass decoder cache plru fpu fpu_round rs fp_rs fcsr rat cdb_arb lsu hart_fp_commit hart_no_hazard hart_hazard hart_ooo_witness hart_cpi)
+MODULES=(alu imm rf_bypass rf_no_bypass decoder cache plru fpu fpu_round fpu_divsqrt rs fp_rs fcsr rat cdb_arb lsu hart_fp_commit hart_no_hazard hart_hazard hart_ooo_witness hart_cpi)
 
 # Most checks share a name with the .v file they test; rf's two checks both
 # target rf.v and hart's four target hart.v. The phase 5 cache lives under

@@ -1,7 +1,7 @@
 `default_nettype none
 
-// fdiv.s / fsqrt.s significand datapath (phase_6.pdf 5.3.2). Bit-serial
-// restoring division and restoring square root, one result bit per cycle.
+// fdiv.s / fsqrt.s significand datapath (phase_6.pdf 5.3.2). Restoring
+// division and square root, three result bits per iteration.
 //
 // The top (fpu.v) resolves every special operand, so this unit only sees
 // finite, nonzero operands (and positive ones for square root). Each operand
@@ -14,7 +14,7 @@
 //
 // Handshake (same as the other multi-cycle units):
 //  * cycle 1: i_valid rises, o_busy goes high, operands are latched
-//  * cycles 2-26: one quotient/root bit per cycle (25 bits)
+//  * cycles 2-9: three bits per cycle after the known leading one
 //  * then o_busy drops and the result is held until i_advance
 // The unit never restarts while a finished result is held, so a cache
 // freeze after the operation finishes cannot rerun it.
@@ -65,7 +65,7 @@ module fpu_divsqrt (
     // ------------------------------------------------------------------
     reg         running;   // stepping
     reg         done;      // finished, result held until i_advance
-    reg  [ 4:0] count;     // steps taken, 0..24
+    reg  [ 2:0] count;     // groups of three remaining bits processed, 0..7
     reg         mode_sqrt;
     reg         res_sign;
     reg  [ 9:0] res_exp;
@@ -75,22 +75,36 @@ module fpu_divsqrt (
     reg  [49:0] radicand;  // square root: bit pairs still to bring down
 
     // ------------------------------------------------------------------
-    // One restoring step.
-    // ------------------------------------------------------------------
-    // Divide: if rem >= divisor, subtract and shift in a 1; then rem << 1.
-    wire        d_ge   = (rem[25:0] >= {2'b00, divisor});
-    wire [25:0] d_sub  = d_ge ? (rem[25:0] - {2'b00, divisor}) : rem[25:0];
-    wire [27:0] d_rem  = {2'b00, d_sub[24:0], 1'b0};
+    // The normalized answer is in [1, 2). Its first bit is one, so the
+    // launch edge can capture the state just after that first subtraction.
+    // Division carries twice the remainder into the next bit. Square root
+    // consumes the top radicand pair and subtracts the first trial (one).
+    wire [25:0] div_first_rem = div_rem0 - {2'b0, i_b_sig};
+    wire [1:0]  sq_first_rem = sq_rad0[49:48] - 2'd1;
 
-    // Square root: bring down the next two radicand bits, and try
-    // subtracting (4 * root + 1).
-    wire [27:0] s_shift = {rem[25:0], radicand[49:48]};
-    wire [27:0] s_trial = {1'b0, res, 2'b01};
-    wire        s_ge    = (s_shift >= s_trial);
-    wire [27:0] s_rem   = s_ge ? (s_shift - s_trial) : s_shift;
-
-    wire        step_bit = mode_sqrt ? s_ge : d_ge;
-    wire [27:0] step_rem = mode_sqrt ? s_rem : d_rem;
+    // Each stage uses a single trial subtraction for either operation.
+    // The borrow selects the restored remainder and the next result bit.
+    wire [27:0] step_rem [0:3];
+    wire [24:0] step_res [0:3];
+    wire [49:0] step_rad [0:3];
+    assign step_rem[0] = rem;
+    assign step_res[0] = res;
+    assign step_rad[0] = radicand;
+    genvar bit_index;
+    generate
+        for (bit_index = 0; bit_index < 3; bit_index = bit_index + 1) begin : restore
+            wire [27:0] partial = mode_sqrt ?
+                {step_rem[bit_index][25:0], step_rad[bit_index][49:48]} : step_rem[bit_index];
+            wire [27:0] trial = mode_sqrt ? {1'b0, step_res[bit_index], 2'b01} :
+                                            {4'b0, divisor};
+            wire [28:0] diff = {1'b0, partial} - {1'b0, trial};
+            wire take_bit = ~diff[28];
+            wire [27:0] restored = take_bit ? diff[27:0] : partial;
+            assign step_rem[bit_index+1] = mode_sqrt ? restored : {restored[26:0], 1'b0};
+            assign step_res[bit_index+1] = {step_res[bit_index][23:0], take_bit};
+            assign step_rad[bit_index+1] = {step_rad[bit_index][47:0], 2'b00};
+        end
+    endgenerate
 
     wire        start = i_valid & ~running & ~done;
 
@@ -98,23 +112,23 @@ module fpu_divsqrt (
         if (i_rst | i_advance | ~i_valid) begin
             running <= 1'b0;
             done    <= 1'b0;
-            count   <= 5'd0;
+            count   <= 3'd0;
         end else if (start) begin
             running   <= 1'b1;
-            count     <= 5'd0;
+            count     <= 3'd0;
             mode_sqrt <= i_sqrt;
             res_sign  <= i_sqrt ? 1'b0 : (i_a_sign ^ i_b_sign);
             res_exp   <= i_sqrt ? sq_exp : div_exp;
-            rem       <= i_sqrt ? 28'd0 : {2'b00, div_rem0};
-            res       <= 25'd0;
+            rem       <= i_sqrt ? {26'd0, sq_first_rem} : {1'b0, div_first_rem, 1'b0};
+            res       <= 25'd1;
             divisor   <= i_b_sig;
-            radicand  <= sq_rad0;
+            radicand  <= {sq_rad0[47:0], 2'b00};
         end else if (running) begin
-            rem      <= step_rem;
-            res      <= {res[23:0], step_bit};
-            radicand <= {radicand[47:0], 2'b00};
-            count    <= count + 5'd1;
-            if (count == 5'd24) begin
+            rem      <= step_rem[3];
+            res      <= step_res[3];
+            radicand <= step_rad[3];
+            count    <= count + 3'd1;
+            if (count == 3'd7) begin
                 running <= 1'b0;
                 done    <= 1'b1;
             end
