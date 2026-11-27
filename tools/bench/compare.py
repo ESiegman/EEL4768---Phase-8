@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIGS = ("graded", "default", "small", "large")
 COURSE = {name: ROOT / f"traces/{name}_program.hex" for name in ("random", "hazard", "no_hazard")}
 PROGRAMS = {**COURSE, **{p.stem: p for p in sorted((ROOT / "traces/bench").glob("*.hex"))}}
+TRAPS = {name: ROOT / f"traces/directed/{name}.hex" for name in ("traps", "trap_jump")}
 
 
 def simulate(source, directory, config, latency, program):
@@ -21,9 +22,11 @@ def simulate(source, directory, config, latency, program):
     rtl = sorted(p for p in source.glob("*.v") if not p.name.endswith("_tb.v"))
     sim = directory / "sim"
     trace = directory / "retire.trace"
+    image = TRAPS[program] if program in TRAPS else PROGRAMS[program]
     args = ["iverilog", "-g2005", "-s", "bench_tb", "-I", str(ROOT),
             f"-DBENCH_CONFIG=`HART_CFG_{config.upper()}", f"-Pbench_tb.LATENCY={latency}",
-            f'-Pbench_tb.PROGRAM="{PROGRAMS[program].relative_to(ROOT)}"', "-o", str(sim),
+            f"-Pbench_tb.TRAPS_OK={int(program in TRAPS)}",
+            f'-Pbench_tb.PROGRAM="{image.relative_to(ROOT)}"', "-o", str(sim),
             ROOT / "tools/bench/bench_tb.v", *rtl, *sorted((source / "cache").glob("*.v"))]
     subprocess.run(args, cwd=ROOT, check=True)
     run = subprocess.run(["vvp", "-n", sim, f"+trace={trace}"], cwd=ROOT,
@@ -51,7 +54,7 @@ def compare(case, current):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--full", action="store_true", help="all four caches at latencies 1, 4 and 10")
-    parser.add_argument("--program", action="append", choices=PROGRAMS)
+    parser.add_argument("--program", action="append", choices=[*PROGRAMS, *TRAPS])
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--current", type=Path, default=ROOT)
     args = parser.parse_args()

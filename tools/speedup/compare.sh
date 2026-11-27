@@ -56,10 +56,14 @@ for prog in random hazard no_hazard; do
     old="$(cycles "${base_line}" "${prog}")"
     new="$(cycles "${new_line}" "${prog}")"
     # Same instructions retired, so IPC_new / IPC_old = cycles_old / cycles_new.
+    if [[ -z "${old}" || -z "${new}" || "${new}" == 0 ]]; then
+        echo "missing or invalid cycle count for ${prog}" >&2
+        exit 1
+    fi
     pct="$(awk -v o="${old}" -v n="${new}" 'BEGIN { printf "%+.1f", (o / n - 1) * 100 }')"
     echo "${prog}: phase 7 ${old} cycles, now ${new} cycles, speedup ${pct}%"
     result="${result}${result:+ | }${prog} ${pct}%"
-    if [[ "${prog}" == "random" ]] && awk -v p="${pct}" -v g="${GOAL}" 'BEGIN { exit !(p < g) }'; then
+    if [[ "${prog}" == "random" ]] && (( 100 * old < (100 + GOAL) * new )); then
         met=0
     fi
 done
@@ -68,4 +72,5 @@ if [[ "${met}" -eq 1 ]]; then
     echo "PASS ${result}"
 else
     echo "BELOW ${result}"
+    exit 1
 fi

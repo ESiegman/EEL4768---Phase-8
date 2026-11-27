@@ -16,7 +16,7 @@ help:
 	@echo "Details:      ./run_test.sh <name> [submission_dir]"
 	@echo "Write your own <check>_tb.v for alu, imm, rf_bypass, rf_no_bypass,"
 	@echo "decoder, cache, plru, fpu, fpu_round, rs, fp_rs, fcsr, rat, cdb_arb,"
-	@echo "lsu, hart_fp_commit, hart_no_hazard,"
+	@echo "fpu_divsqrt, lsu, hart_fp_commit, hart_no_hazard,"
 	@echo "hart_hazard, hart_ooo_witness and hart_cpi -- see README.md and"
 	@echo "example/opmux_tb.v."
 	@echo "Run pip install ./lint once so make test also runs the ece552 rule"
@@ -44,7 +44,7 @@ bench-full:
 # Keep the archive layout identical to Phase 7.
 submission:
 	@mkdir -p build
-	@git ls-files -- '*.v' | awk '($$0 !~ /\// || $$0 ~ /^cache\/[^/]+$$/) && $$0 !~ /_tb\.v$$/' | zip -q -FS build/phase8_submission.zip -@
+	@zip -q -FS build/phase8_submission.zip $(filter-out %_tb.v,$(wildcard *.v cache/*.v))
 
 fv:
 	@./fv/riscv/run.sh .

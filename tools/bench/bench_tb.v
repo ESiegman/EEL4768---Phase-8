@@ -5,9 +5,10 @@
 module bench_tb;
     parameter PROGRAM = "";
     parameter LATENCY = 4;
+    parameter TRAPS_OK = 0;
     wire done;
     hart_harness #(.LABEL("bench"), `BENCH_CONFIG, .LATENCY(LATENCY),
-                   .PROG(PROGRAM), .REF(""), .TRAPS_OK(0)) h (1'b1, done);
+                   .PROG(PROGRAM), .REF(""), .TRAPS_OK(TRAPS_OK)) h (1'b1, done);
 
     integer fd, count;
     reg [8*512-1:0] trace_path;
