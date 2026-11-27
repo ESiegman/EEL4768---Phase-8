@@ -222,7 +222,9 @@ module alu (
             if (node >= 4 && node < 8) begin : stage_boundary
                 reg [63:0] subtotal;
                 always @(posedge i_clk) begin
-                    if (m_start && !m_is_div)
+                    if (i_rst)
+                        subtotal <= 64'd0;
+                    else if (m_start && !m_is_div)
                         subtotal <= sum;
                 end
                 assign product_tree[node] = subtotal;
