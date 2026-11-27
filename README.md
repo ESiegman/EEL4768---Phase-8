@@ -3,7 +3,7 @@
 
 An out-of-order (Tomasulo-style) RV32I hart with the M and F extensions.
 Phase 8 (extra credit, [documentation/extra_credit.pdf](documentation/extra_credit.pdf))
-raises IPC from 0.2914 to 0.5482 (+88.11%) on the supplied 34,598-instruction
+raises IPC from 0.2914 to 0.5591 (+91.85%) on the supplied 34,598-instruction
 random program at the graded cache settings. The frozen Phase 7 reference in
 `baseline/phase7/` matches Phase 7 commit `39d26f0`.
 Everything in the phase 7 assignment,
@@ -29,7 +29,7 @@ three, so its run is the full check.
 
 ## Reproduce the Phase 8 results
 
-`make speedup` runs the supplied programs and checks the 25% target on the random program. `make bench` compares every retirement field between Phase 7 and Phase 8 on 12 workloads. It reports per-program cycles, IPC and percentage gains at the graded and default cache settings. Python 3.8+ and Icarus Verilog are required. The hidden grading programs are available only to course staff.
+`make speedup` runs the supplied programs and checks the 25% target on the random program. `make bench` compares every retirement field between Phase 7 and Phase 8 on 14 workloads. It reports per-program cycles, IPC and percentage gains at the graded and default cache settings. Python 3.8+ and Icarus Verilog are required. The hidden grading programs are available only to course staff.
 
 ```sh
 make bench-full > measurements.csv
@@ -37,7 +37,7 @@ python3 tools/bench/compare.py --full --program traps --program trap_jump
 make submission
 ```
 
-The full benchmark crosses four caches with memory latencies of 1, 4 and 10 cycles. `python3 tools/bench/generate.py` regenerates the nine committed loops. The submission archive is `build/phase8_submission.zip`.
+The full benchmark crosses four caches with memory latencies of 1, 4 and 10 cycles. `python3 tools/bench/generate.py` regenerates the eleven additional programs. The submission archive is `build/phase8_submission.zip`.
 
 For the extended arithmetic tests, run `make test` first, then `vvp -n build/alu_sim +no_dump +m_vectors=1000000`. With a RISC-V-specialized Berkeley TestFloat build, `python3 tools/bench/testfloat.py /path/to/testfloat_gen` checks an additional 275,000 divide and square-root vectors. [TestFloat build instructions](tools/fpu_vectors/README.md)
 

@@ -1,4 +1,4 @@
-# Phase 8 arithmetic datapaths
+# Phase 8 processor changes
 
 On the supplied random program, Phase 7 spent 53,970 cycles without a retirement immediately before an integer M instruction. An iterative multiply or divide held the shared integer ALU for 33 busy cycles. Independent integer work queued behind it. Finite floating-point divide and square root also took 26 busy cycles, and an older unfinished operation could hold up retirement even when a younger operation had completed.
 
@@ -16,9 +16,17 @@ Normalized finite inputs and exponent adjustment put the result significand in t
 
 Both units hold a completed result through backpressure until the consumer advances. The additional adders and trial subtractors trade area and combinational delay for fewer clocks. The measurements use RTL simulation. Measuring maximum clock frequency and elapsed hardware time would require a target device, synthesis constraints and timing analysis.
 
-## Why arithmetic
+## Forwarding from committed stores
 
-Phase 7 already resolves a ready branch at dispatch, and the target can issue in that cycle. Its integer branch/call loop took 244 cycles for 242 instructions. Even ideal single-issue throughput could recover less than 1% there. The load-dependent branch loop spent 871 cycles retiring 677 instructions at the graded settings. Its 64-byte stride stresses the memory system, which these arithmetic changes do not accelerate. The final measurements include both controls. [Measurement table](phase8_results.md)
+Phase 7 writes a store miss through to memory without allocating the line in L1. A later load of the same word can then stall to fetch data the processor already supplied. The hart now keeps 64 recently stored words in a direct-mapped buffer. The index folds two groups of six address bits with XOR so that common power-of-two strides spread across slots. The remaining 24 tag bits, the 32-bit word and a valid bit cost 456 bytes of storage in total.
+
+A complete store installs its word only when the cache accepts the store. A byte or halfword store updates the enabled lanes if the address already matches. A partial store alone cannot establish the contents of all four lanes. A load first checks L1, then uses a matching buffered word on an L1 miss. The LSU still delivers the full raw word on the retirement interface and separately extracts the requested signed or unsigned value.
+
+## Starting confirmed loads earlier
+
+The LSU can send a cache-line address as soon as an aligned load enters the queue with a ready base, when the head load receives its base on the common data bus, or when the load immediately following the head already has an address. It keeps these lookups behind older queued stores. The cache issues a read in an unused request slot after checking the L1, store-word buffer and outstanding addresses. It leaves two FIFO slots for ordinary traffic. A matching prefetch response can supply the head load on its arrival cycle. Stores still update memory in order, and the existing completion and retirement logic controls when a load becomes architecturally visible.
+
+The existing front end resolves a ready branch at dispatch and can issue the target in that cycle. The integer branch/call loop already retires 242 instructions in 244 cycles, with just two cycles for pipeline fill. The load-dependent branch loop also reaches this limit once forwarding makes its branch operands available. These results favored accelerating actual loads over adding branch prediction and recovery logic. [Measurement table](phase8_results.md)
 
 ## Submission contents
 

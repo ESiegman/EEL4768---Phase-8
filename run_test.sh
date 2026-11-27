@@ -47,7 +47,7 @@ fi
 # The two .trace files are the phase 4 course traces: cycle by cycle for an
 # in-order pipeline, so only their retire lines (not BUBBLE lines or cycle
 # numbers) apply to an out-of-order hart. traces/random_*.hex are phase 6's.
-MODULES=(alu imm rf_bypass rf_no_bypass decoder cache plru fpu fpu_round fpu_divsqrt rs fp_rs fcsr rat cdb_arb lsu hart_fp_commit hart_no_hazard hart_hazard hart_ooo_witness hart_cpi)
+MODULES=(alu imm rf_bypass rf_no_bypass decoder cache cache_forward plru fpu fpu_round fpu_divsqrt rs fp_rs fcsr rat cdb_arb lsu hart_fp_commit hart_no_hazard hart_hazard hart_ooo_witness hart_cpi)
 
 # Most checks share a name with the .v file they test; rf's two checks both
 # target rf.v and hart's four target hart.v. The phase 5 cache lives under
@@ -57,6 +57,7 @@ dut_for() {
     case "$1" in
         rf_bypass | rf_no_bypass) echo "rf" ;;
         hart_*) echo "hart" ;;
+        cache_forward) echo "cache/cache" ;;
         cache | plru) echo "cache/$1" ;;
         *) echo "$1" ;;
     esac
@@ -133,9 +134,10 @@ else
 fi
 
 if python3 "${SCRIPT_DIR}/tools/bench/compare.py" --current "${SUBMISSION_DIR}" \
-        --program mixed_17 --program fp_loop --program ldbr_loop --program traps --program trap_jump \
+        --program mixed_17 --program fp_loop --program ldbr_loop --program pointer_walk \
+        --program read_gather --program traps --program trap_jump \
         > "${BUILD_DIR}/retire-diff.csv" 2> "${BUILD_DIR}/retire-diff.log"; then
-    echo "PASS Trace: vs phase 7  --  5 programs at 2 cache/latency settings" >> "${SUMMARY_FILE}"
+    echo "PASS Trace: vs phase 7  --  7 programs at 2 cache/latency settings" >> "${SUMMARY_FILE}"
 else
     echo "FAIL Trace: vs phase 7  --  see build/retire-diff.log" >> "${SUMMARY_FILE}"
     overall_status=1

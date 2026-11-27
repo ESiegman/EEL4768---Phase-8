@@ -32,6 +32,30 @@ def mixed(seed):
     return loop([*body, a.addi(4, 4, 16)], setup, rounds=24)
 
 
+def memory_stress():
+    # Halfword offsets keep the pointer table compact. Visit 96 distinct
+    # lines in a fixed shuffled cycle. Each load address depends on the last.
+    order = list(range(96))
+    random.Random(4768).shuffle(order)
+    links = dict(zip(order, order[1:] + order[:1]))
+    table = [a.li(10, a.DBASE), a.addi(4, 10, 0)]
+    for node in range(len(order)):
+        table.extend([a.li(5, links[node] * 64), a.sh(5, 4, 0), a.addi(4, 4, 64)])
+    pointer = loop([a.lhu(5, 4, 0), a.add(4, 10, 5)],
+                   [*table, a.addi(4, 10, 0)], rounds=len(order))
+
+    # Three independent reads per iteration, from irregularly spaced lines.
+    # Initialize nonzero data in every line, then reduce the gathered values.
+    offsets = list(range(96))
+    random.Random(347).shuffle(offsets)
+    gather = [a.li(10, a.DBASE), a.addi(4, 10, 0), a.li(1, 96), a.label("init"),
+              a.sh(1, 4, 0), a.addi(4, 4, 16), a.addi(1, 1, -1), a.bne(1, 0, "init")]
+    for j in range(0, len(offsets), 3):
+        gather.extend(a.lhu(5 + k, 10, offsets[j + k] * 16) for k in range(3))
+        gather.extend([a.add(8, 8, 5), a.add(8, 8, 6), a.add(8, 8, 7)])
+    return {"pointer_walk": pointer, "read_gather": [*gather, a.EBREAK]}
+
+
 def programs():
     ints = [a.andi(2, 1, 1), a.beq(2, 0, "call"), a.xori(3, 3, -1),
             a.label("call"), a.jal(5, "subroutine")]
@@ -47,6 +71,7 @@ def programs():
           a.R(0x2C, 0, 6, 7, 7, 0x53), a.R(0x60, 0, 7, 3, 7, 0x53),
           a.I(1, 0, 2, 8, 0x73), a.I(2, 1, 5, 9, 0x73)]
     return {
+        **memory_stress(),
         "int_loop": int_loop,
         "ldbr_loop": ldbr,
         "mem_loop": loop([a.sw(1, 4, 0), a.lw(3, 4, 0), a.add(5, 5, 3),
