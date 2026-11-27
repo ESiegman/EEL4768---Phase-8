@@ -116,6 +116,8 @@ module lsu #(
     wire [ 2:0] e_tag   [0:7];
     wire [ 7:0] e_st;       // store
     wire [ 2:0] e_f3    [0:7];
+    wire [ 2:0] e_bq   [0:7];
+    wire [31:0] e_imm  [0:7];
     wire [ 7:0] e_bw;       // base still waiting
     wire [31:0] e_bv    [0:7];
     wire [ 7:0] e_dw;       // store data still waiting
@@ -175,6 +177,8 @@ module lsu #(
             assign e_tag[n]   = tag;
             assign e_st[n]    = st;
             assign e_f3[n]    = f3;
+            assign e_bq[n]    = bq;
+            assign e_imm[n]   = imm;
             assign e_bw[n]    = bw;
             assign e_bv[n]    = bv;
             assign e_dw[n]    = dw;
@@ -330,15 +334,42 @@ module lsu #(
             load_busy <= drive_load & ~c_ready;
     end
 
+    // Read ahead at most one queue position. An already queued follower
+    // takes precedence over the load being admitted on this edge. Only
+    // ready, aligned addresses of actual loads can become hints.
+    wire [3:0] after_cp = cp + 4'd1;
+    wire [2:0] follower = after_cp[2:0];
+    wire queued_next = cp_has & (after_cp != tl);
+    wire waking_head = cp_has & ~cp_st & e_bw[cp_i] & i_cdb_valid &
+                       (e_bq[cp_i] == i_cdb_tag);
+    wire queued_hint = queued_next & ~cp_st & ~e_st[follower] & ~e_bw[follower] & ~e_mis[follower];
+    wire alloc_hint = ~queued_next & (~cp_has | ~cp_st) & alloc & ~i_alloc_store &
+                      (~i_alloc_base_wait | alloc_base_hit);
+
+    // A completing dependency can supply a base on the CDB before the LSU
+    // registers it. The hint affects memory request scheduling only.
+    wire [31:0] hint_base = (waking_head | i_alloc_base_wait) ? i_cdb_value : i_alloc_base_value;
+    wire [31:0] hint_imm  = waking_head ? e_imm[cp_i] : i_alloc_imm;
+    wire [31:0] hint_ea   = hint_base + hint_imm;
+    wire [1:0] hint_size = waking_head ? cp_f3[1:0] : i_alloc_funct3[1:0];
+    wire hint_aligned = (hint_size == 2'b00) |
+                        ((hint_size == 2'b01) ? ~hint_ea[0] : ~|hint_ea[1:0]);
+    wire use_follower = ~waking_head & queued_hint;
+    wire hint_valid = use_follower | ((waking_head | alloc_hint) & hint_aligned);
+
     cache #(
         .EVICT_POLICY(EVICT_POLICY),
         .NUM_WAYS    (NUM_WAYS),
         .CACHE_SIZE  (CACHE_SIZE),
         .BLOCK_SIZE  (BLOCK_SIZE),
-        .PREFETCH_EN (PREFETCH_EN)
+        .PREFETCH_EN (PREFETCH_EN),
+        .FORWARD_STORES(1),
+        .LOAD_LOOKAHEAD(1)
     ) dcache (
         .i_clk        (i_clk),
         .i_rst        (i_rst),
+        .i_hint_valid (hint_valid),
+        .i_hint_addr  (use_follower ? e_ea[follower] : hint_ea),
         .i_ren        (drive_load),
         .i_wen        (drive_store),
         .i_addr       (c_addr),
