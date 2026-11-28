@@ -207,6 +207,7 @@ module alu_tb;
         end
     endfunction
 
+    integer m_vectors;
     integer m_cycles;
     integer m_max_cycles;
     reg [31:0] m_held;
@@ -310,8 +311,10 @@ module alu_tb;
     reg        r_sub, r_uns, r_arith, want_eq, want_slt;
 
     initial begin
-        $dumpfile("alu.vcd");
-        $dumpvars(0, alu_tb);
+        if (!$test$plusargs("no_dump")) begin
+            $dumpfile("alu.vcd");
+            $dumpvars(0, alu_tb);
+        end
 
         passed = 0;
         failed = 0;
@@ -626,9 +629,17 @@ module alu_tb;
         m_case("div after reset",  M_DIV, 32'd100, 32'd3, 0);
         if (failed == k) $display("[PASS] a reset mid-divide does not corrupt the next operation");
 
+        // Prefix skipping must keep the first nonzero base-four digit
+        // when the quotient crosses 256 or 65536.
+        for (k = -1; k <= 1; k = k + 1) begin
+            m_case("8-bit prefix boundary", M_DIVU, (32'd13 << 8) + k, 13, 0);
+            m_case("16-bit prefix boundary", M_REMU, (32'd13 << 16) + k, 13, 0);
+        end
+
         $display("--- RV32M random vs model ---");
         seed = 32'd4768;
-        for (i = 0; i < 400; i = i + 1) begin
+        if (!$value$plusargs("m_vectors=%d", m_vectors)) m_vectors = 4000;
+        for (i = 0; i < m_vectors; i = i + 1) begin
             r_opsel = $random(seed);
             r_op1   = $random(seed);
             r_op2   = $random(seed);
@@ -638,11 +649,13 @@ module alu_tb;
                 1: r_op2 = $random(seed) & 32'hF;
                 2: r_op1 = 32'h8000_0000;
                 3: r_op2 = 32'hFFFF_FFFF;
+                4: r_op2 = 32'd1 << (r_op1 & 31);
+                5: r_op1 = 32'h7fff_ffff;
                 default: ;
             endcase
             m_case("random M", r_opsel, r_op1, r_op2, $random(seed) & 3);
         end
-        $display("       400 random M vectors checked against the model");
+        $display("       %0d random M vectors checked against the model", m_vectors);
         $display("       longest M operation: %0d busy cycles", m_max_cycles);
         mext = 1'b0;
         advance = 1'b1;

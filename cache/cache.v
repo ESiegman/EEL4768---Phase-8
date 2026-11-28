@@ -15,7 +15,10 @@ module cache #(
     // Bytes per line.
     parameter BLOCK_SIZE   = 128,
     // Next-line prefetch on a load miss: 1 = on, 0 = off.
-    parameter PREFETCH_EN  = 0
+    parameter PREFETCH_EN  = 0,
+    // The hart adds a buffer of committed store words alongside its L1.
+    parameter FORWARD_STORES = 0,
+    parameter LOAD_LOOKAHEAD = 0
 ) (
     // Global clock.
     input  wire                    i_clk,
@@ -52,7 +55,10 @@ module cache #(
     output wire [BLOCK_SIZE*8-1:0] o_mem_wr_data,
     // One bit per byte: all ones for a dirty write-back, only the stored
     // bytes for a write-through.
-    output wire [BLOCK_SIZE-1:0]   o_mem_wr_be
+    output wire [BLOCK_SIZE-1:0]   o_mem_wr_be,
+    // Optional line lookup for an aligned load the LSU has already admitted.
+    input  wire                    i_hint_valid,
+    input  wire [31:0]             i_hint_addr
 );
 
     localparam OFFSET_BITS = $clog2(BLOCK_SIZE);
@@ -76,8 +82,8 @@ module cache #(
     reg [31:0] pending_addr;
 
     wire [31:0] demand_line_addr = {i_addr[31:OFFSET_BITS], {OFFSET_BITS{1'b0}}};
-    wire [31:0] next_line_addr = demand_line_addr + BLOCK_BYTES;
-    wire [31:0] prefetch_lookup_addr = prefetch_pending ? pending_addr : next_line_addr;
+    wire [31:0] hint_line_addr = {i_hint_addr[31:OFFSET_BITS], {OFFSET_BITS{1'b0}}};
+    wire [31:0] prefetch_lookup_addr = prefetch_pending ? pending_addr : hint_line_addr;
     wire [REQUEST_DEPTH:0] demand_duplicate;
     wire [REQUEST_DEPTH:0] prefetch_duplicate;
     assign demand_duplicate[0] = 1'b0;
@@ -109,8 +115,17 @@ module cache #(
                         ((request_count == DEMAND_LIMIT) & request_pop));
     wire demand_accept = ~i_rst & load_miss &
                          ~prefetch_send & demand_room & ~demand_duplicate[REQUEST_DEPTH];
-    assign o_mem_rd = prefetch_send | demand_accept;
-    assign o_mem_rd_addr = prefetch_send ? pending_addr : demand_line_addr;
+    // Use otherwise idle read bandwidth for a confirmed future load. Keep
+    // two FIFO slots available for a demand and its ordinary next-line read.
+    // Do not sample a line on the same edge a committing store changes it.
+    wire hint_forwardable;
+    wire hint_send = (LOAD_LOOKAHEAD != 0) & ~i_rst & i_hint_valid & ~prefetch_pending &
+                     ~demand_accept & (request_count < 3'd2) & ~hint_forwardable &
+                     ~prefetch_cached & ~prefetch_duplicate[REQUEST_DEPTH] &
+                     ~(i_wen & (demand_line_addr == hint_line_addr));
+    assign o_mem_rd = prefetch_send | demand_accept | hint_send;
+    assign o_mem_rd_addr = prefetch_send ? pending_addr :
+                           hint_send ? hint_line_addr : demand_line_addr;
 
     always @(posedge i_clk) begin
         if (i_rst) begin
@@ -131,9 +146,9 @@ module cache #(
             endcase
             // A skipped pending prefetch is consumed just like a sent one.
             // Its reserved slot ensures no additional queue wait is needed.
-            prefetch_pending <= (PREFETCH_EN != 0) & demand_accept;
-            if (demand_accept)
-                pending_addr <= next_line_addr;
+            prefetch_pending <= (PREFETCH_EN != 0) & (demand_accept | hint_send);
+            if (demand_accept || hint_send)
+                pending_addr <= o_mem_rd_addr + BLOCK_BYTES;
         end
     end
 
@@ -157,7 +172,7 @@ module cache #(
                     addr <= 32'b0;
                 end else if (o_mem_rd && (request_tail == SLOT)) begin
                     valid <= 1'b1;
-                    is_prefetch <= prefetch_send;
+                    is_prefetch <= prefetch_send | hint_send;
                     addr <= o_mem_rd_addr;
                 end else if (request_pop && (request_head == SLOT)) begin
                     valid <= 1'b0;
@@ -263,10 +278,51 @@ module cache #(
  
   // CPU access outcomes (only while idle and no fill is using the arrays).
   wire load_hit   = cpu_go & i_ren & hit;
-  assign load_miss = cpu_go & i_ren & ~hit;
+  wire stored_word_hit;
+  wire [31:0] stored_word;
+  wire forwarded_load = cpu_go & i_ren & ~hit & stored_word_hit;
+  assign load_miss = cpu_go & i_ren & ~hit & ~stored_word_hit;
   wire store_hit  = cpu_go & i_wen & hit;
   wire store_miss = cpu_go & i_wen & ~hit;
  
+  // A write-through, no-write-allocate store can leave a later load
+  // waiting for a line that contains the word the CPU just supplied.
+  // Keep complete words from accepted stores. L1 hits retain priority so
+  // their replacement state is updated normally.
+  generate
+    if (FORWARD_STORES != 0) begin : g_store_buffer
+      // XOR folding spreads power-of-two strides over the 64 slots.
+      // Given this index and address[31:8], address[7:2] is unique.
+      wire [5:0] index = i_addr[7:2] ^ i_addr[13:8];
+      reg [63:0] valid;
+      reg [23:0] tags [0:63];
+      reg [31:0] words [0:63];
+      assign stored_word_hit = valid[index] & (tags[index] == i_addr[31:8]);
+      assign stored_word = words[index];
+      wire [5:0] hint_index = i_hint_addr[7:2] ^ i_hint_addr[13:8];
+      assign hint_forwardable = valid[hint_index] & (tags[hint_index] == i_hint_addr[31:8]);
+      wire [31:0] byte_enable = {{8{i_mask[3]}}, {8{i_mask[2]}},
+                                 {8{i_mask[1]}}, {8{i_mask[0]}}};
+      always @(posedge i_clk) begin
+        if (i_rst) begin
+          valid <= 64'd0;
+        end else if (store_hit || store_miss) begin
+          if (&i_mask) begin
+            valid[index] <= 1'b1;
+            tags[index] <= i_addr[31:8];
+            words[index] <= i_wdata;
+          end else if (stored_word_hit) begin
+            words[index] <= (stored_word & ~byte_enable) | (i_wdata & byte_enable);
+          end
+        end
+      end
+    end else begin : g_l1_only
+      assign stored_word_hit = 1'b0;
+      assign stored_word = 32'd0;
+      assign hint_forwardable = 1'b0;
+    end
+  endgenerate
+
   wire [LINE_BITS-1:0] store_line; // hit line with the store merged in
  
   genvar w;
@@ -468,10 +524,12 @@ module cache #(
     end
   end
 
-wire demand_done = fill & fill_is_demand;
+// If a queued prefetch returns as its load reaches the head, the
+// arriving word is already usable. The arbiter still controls completion.
+wire demand_done = demand_return | (idle & i_ren & prefetch_fill & (cpu_line_addr == fill_addr));
 
-assign o_ready = ~i_rst & (~(i_ren | i_wen) | load_hit | store_hit | store_miss | demand_done);
-assign o_rdata = demand_done ? fill_word : hit_word;
+assign o_ready = ~i_rst & (~(i_ren | i_wen) | load_hit | forwarded_load | store_hit | store_miss | demand_done);
+assign o_rdata = demand_done ? fill_word : forwarded_load ? stored_word : hit_word;
 
   //memory port
   // Reads are issued and tracked by the demand/prefetch queue above.
